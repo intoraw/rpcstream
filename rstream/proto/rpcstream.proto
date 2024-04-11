@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package rpcstream;
+
+message PGetDataRequest {
+  int64 seq = 1;
+}
+
+message PGetDataResponse {
+  int64 seq = 1;
+  string data = 2;
+}
+
+message PAckDataRequest {
+  int64 seq = 1;
+}
+
+message PAckDataResponse {
+}
+
+service DataService{
+  rpc GetData(PGetDataRequest) returns( PGetDataResponse) {}
+  rpc AckData(PAckDataRequest) returns (PAckDataResponse) {}
+}

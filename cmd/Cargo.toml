@@ -1,0 +1,24 @@
+[package]
+name = "cmd"
+version.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+
+[[bin]]
+name = "cli"
+path = "src/cli.rs"
+
+[[bin]]
+name = "svr"
+path = "src/svr.rs"
+
+
+[dependencies]
+rstream = { path = "../rstream", package = "rstream" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+futures = { workspace = true }
+pin-project = "1.1.5"
+tokio-util = "0.7.10"

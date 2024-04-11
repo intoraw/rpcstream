@@ -1,0 +1,18 @@
+[package]
+name = "rstream"
+version.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+
+[dependencies]
+futures = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+
+
+[build-dependencies]
+prost-derive = { workspace = true }
+tonic-build = { workspace = true }
