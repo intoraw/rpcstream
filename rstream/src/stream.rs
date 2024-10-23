@@ -1,24 +1,27 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::LinkedList, future::Future, pin::Pin, sync::Arc, task::Poll};
 
-use futures::Stream;
-use pin_project::pin_project;
-use tonic::Status;
+use futures::{future::Remote, FutureExt, Stream};
+use tonic::{Response, Status};
 
 use crate::{
     cli::Client,
     pb::{PAckDataRequest, PAckDataResponse, PCloseResponse, PGetDataRequest, PGetDataResponse},
 };
 
-#[pin_project]
+pub type Payload = String;
+
 pub struct RpcReader {
+    state: State,
     inner: Arc<Client>,
     seq: i64,
-    #[pin]
-    state: State,
     // data not acked
-    pending: Option<String>,
+    pending: Option<Payload>,
+    // error information
     error: Option<RpcReadError>,
+    // eos
     eos: bool,
+    // data acked
+    buf: LinkedList<Payload>,
 }
 
 #[derive(Debug)]
@@ -57,6 +60,7 @@ impl RpcReader {
             pending: None,
             error: None,
             eos: false,
+            buf: Default::default(),
         }
     }
 }
@@ -71,9 +75,10 @@ impl Stream for RpcReader {
         loop {
             match self.state {
                 State::Get(ref mut pin) => {
-                    let res = futures::ready!(pin.as_mut().poll(cx));
+                    let res = pin.as_mut().poll(cx);
                     match res {
-                        Ok(resp) => {
+                        Poll::Pending => break,
+                        Poll::Ready(Ok(resp)) => {
                             let PGetDataResponse { seq, data, eos } = resp.into_inner();
                             let fut = {
                                 let cli_ptr: *const Client = self.inner.as_ref();
@@ -85,7 +90,7 @@ impl Stream for RpcReader {
                             self.pending = Some(data);
                             self.state = State::Ack(Box::pin(fut));
                         }
-                        Err(_) => {
+                        Poll::Ready(Err(_)) => {
                             // transit to closed state
                             let fut = {
                                 let cli_ptr: *const Client = self.inner.as_ref();
@@ -99,9 +104,10 @@ impl Stream for RpcReader {
                 }
                 State::Ack(ref mut pin) => {
                     let ack_fut = pin;
-                    let res = futures::ready!(ack_fut.as_mut().poll(cx));
+                    let res = ack_fut.as_mut().poll(cx);
                     match res {
-                        Ok(_) => {
+                        Poll::Pending => break,
+                        Poll::Ready(Ok(_)) => {
                             let fut = {
                                 let cli_ptr: *const Client = self.inner.as_ref();
                                 // # safety: cli_ptr will be valid as long as cli is valid
@@ -110,10 +116,10 @@ impl Stream for RpcReader {
                             };
                             self.state = State::Get(Box::pin(fut));
                             let data = self.pending.take().unwrap();
+                            self.buf.push_back(data);
                             self.seq += 1;
-                            return std::task::Poll::Ready(Some(Ok(data)));
                         }
-                        Err(_) => {
+                        Poll::Ready(Err(_)) => {
                             // transit to closed state
                             let fut = {
                                 let cli_ptr: *const Client = self.inner.as_ref();
@@ -126,12 +132,13 @@ impl Stream for RpcReader {
                     }
                 }
                 State::Closing(ref mut pin) => {
-                    let res = futures::ready!(pin.as_mut().poll(cx));
+                    let res = pin.as_mut().poll(cx);
                     match res {
-                        Ok(_) => {
+                        Poll::Pending => break,
+                        Poll::Ready(Ok(_)) => {
                             self.state = State::Closed;
                         }
-                        Err(_) => {
+                        Poll::Ready(Err(_)) => {
                             self.state = State::Closed;
                         }
                     }
@@ -145,5 +152,145 @@ impl Stream for RpcReader {
                 }
             }
         }
+
+        println!("buf len {}", self.buf.len());
+
+        if !self.buf.is_empty() {
+            let data = self.buf.pop_front().unwrap();
+            Poll::Ready(Some(Ok(data)))
+        } else if self.eos {
+            return Poll::Ready(None);
+        } else if self.error.is_some() {
+            let error = self.error.take().unwrap();
+            return Poll::Ready(Some(Err(error)));
+        } else {
+            return Poll::Pending;
+        }
+    }
+}
+
+/// DataChannel is a resource, when dropped, should call rpc function
+/// to close the channel
+pub struct RemoteBuffer {
+    //# Safety: user should guarantee raw_client cannot outlive the Client
+    raw_cli: &'static Client,
+    owned_cli: Arc<Client>,
+    state: BufferState,
+    eos: bool,
+    seq: i64,
+    pending: Option<Payload>,
+    acked: LinkedList<Payload>,
+}
+
+impl RemoteBuffer {
+    pub fn new(cli: Arc<Client>) -> Self {
+        let owned_cli = cli;
+        let raw_cli: &'static Client = unsafe { &*(owned_cli.as_ref() as *const Client) };
+        Self {
+            raw_cli,
+            owned_cli,
+            state: Default::default(),
+            seq: 0,
+            pending: None,
+            acked: Default::default(),
+            eos: false,
+        }
+    }
+
+    pub async fn get(&self, seq: i64) -> Result<tonic::Response<PGetDataResponse>, Status> {
+        let req = PGetDataRequest { seq };
+        self.raw_cli.get_data(req).await
+    }
+
+    pub async fn ack(&self, seq: i64) -> Result<tonic::Response<PAckDataResponse>, Status> {
+        let req = PAckDataRequest { seq };
+        self.raw_cli.ack_data(req).await
+    }
+
+    pub async fn close(&self) -> Result<tonic::Response<PCloseResponse>, Status> {
+        self.raw_cli.close().await
+    }
+}
+
+// #Safety: tonic guarantees client is thread safe
+unsafe impl Sync for RemoteBuffer {}
+
+impl Drop for RemoteBuffer {
+    fn drop(&mut self) {
+        let cli = self.owned_cli.clone();
+        tokio::spawn(async move {
+            let _ = cli.close().await;
+            // log error if close failed
+            // we can do nothing if close is failed. maybe retry
+        });
+    }
+}
+
+pub enum BufferError {
+    GetDataErr(Status),
+    AckDataErr(Status),
+    CloseErr(Status),
+}
+
+#[derive(Default)]
+pub enum BufferState {
+    #[default]
+    Idle,
+    Busy(Operation),
+    Terminated,
+}
+
+pub enum Operation {
+    Get(GetDataFuture),
+    Ack(AckDataFuture),
+}
+
+impl Future for RemoteBuffer {
+    type Output = Result<Payload, BufferError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.state {
+                BufferState::Idle => {
+                    let fut = { self.raw_cli.get_data(PGetDataRequest { seq: self.seq }) };
+                    self.state = BufferState::Busy(Operation::Get(Box::pin(fut)))
+                }
+                BufferState::Busy(Operation::Get(ref mut fut)) => match fut.as_mut().poll_unpin(cx)
+                {
+                    Poll::Ready(Ok(resp)) => {
+                        let PGetDataResponse { seq, data, eos } = resp.into_inner();
+                        self.pending = Some(data);
+                        self.eos |= eos;
+                        let fut = { self.raw_cli.ack_data(PAckDataRequest { seq }) };
+                        self.state = BufferState::Busy(Operation::Ack(Box::pin(fut)));
+                    }
+                    Poll::Ready(Err(status)) => {
+                        self.state = BufferState::Err(BufferError::Terminated(status));
+                    }
+                    Poll::Pending => break,
+                },
+                BufferState::Busy(Operation::Ack(ref mut fut)) => match fut.as_mut().poll_unpin(cx)
+                {
+                    Poll::Ready(Ok(_)) => {
+                        let data = self.pending.take().unwrap();
+                        self.acked.push_back(data);
+                        self.seq += 1;
+                        if self.eos {
+                            self.state = BufferState::Finished;
+                        } else {
+                            let fut = { self.raw_cli.get_data(PGetDataRequest { seq: self.seq }) };
+                            self.state = BufferState::Busy(Operation::Get(Box::pin(fut)));
+                        }
+                    }
+                    Poll::Ready(Err(status)) => {
+                        self.state = BufferState::Err(BufferError::GetDataErr(status));
+                    }
+                    Poll::Pending => break,
+                },
+                BufferState::Finished => break,
+                BufferState::Err(_) => break,
+            }
+        }
+        todo!()
     }
 }
