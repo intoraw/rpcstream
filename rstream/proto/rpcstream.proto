@@ -2,15 +2,20 @@ syntax = "proto3";
 
 package rpcstream;
 
+/// Get data with seqno
 message PGetDataRequest {
   int64 seq = 1;
 }
 
+/// Return data with seqno
 message PGetDataResponse {
   int64 seq = 1;
   string data = 2;
+  /// True on end of stream
+  bool eos = 3;
 }
 
+/// Ack data with seqno
 message PAckDataRequest {
   int64 seq = 1;
 }
@@ -18,7 +23,16 @@ message PAckDataRequest {
 message PAckDataResponse {
 }
 
+message PCloseRequest {
+
+}
+
+message PCloseResponse {
+  
+}
+
 service DataService{
   rpc GetData(PGetDataRequest) returns( PGetDataResponse) {}
   rpc AckData(PAckDataRequest) returns (PAckDataResponse) {}
+  rpc Close(PCloseRequest) returns (PCloseResponse) {}
 }

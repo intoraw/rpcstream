@@ -5,7 +5,7 @@ use tonic::transport::Server;
 async fn main() {
     let addr = "127.0.0.1:8888".parse().unwrap();
 
-    let svc = DataServiceImpl {};
+    let svc = DataServiceImpl::new(100);
 
     Server::builder()
         .add_service(DataServiceServer::new(svc))

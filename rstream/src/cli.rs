@@ -1,8 +1,8 @@
 use tonic::transport::{Channel, Endpoint};
 
-use crate::{
-    pb::{data_service_client::DataServiceClient, PGetDataRequest},
-    pb::{PAckDataRequest, PAckDataResponse, PGetDataResponse},
+use crate::pb::{
+    data_service_client::DataServiceClient, PAckDataRequest, PAckDataResponse, PCloseRequest,
+    PCloseResponse, PGetDataRequest, PGetDataResponse,
 };
 
 //pub type Client = DataServiceClient<Channel>;
@@ -26,7 +26,8 @@ impl Client {
         &self,
         request: impl tonic::IntoRequest<PGetDataRequest>,
     ) -> std::result::Result<tonic::Response<PGetDataResponse>, tonic::Status> {
-        self.inner.clone().get_data(request).await
+        let mut x = self.inner.clone();
+        x.get_data(request).await
     }
 
     pub async fn ack_data(
@@ -34,5 +35,13 @@ impl Client {
         request: impl tonic::IntoRequest<PAckDataRequest>,
     ) -> std::result::Result<tonic::Response<PAckDataResponse>, tonic::Status> {
         self.inner.clone().ack_data(request).await
+    }
+
+    pub async fn close(
+        &self,
+    ) -> std::result::Result<tonic::Response<PCloseResponse>, tonic::Status> {
+        let req = PCloseRequest {};
+        let mut x = self.inner.clone();
+        x.close(req).await
     }
 }

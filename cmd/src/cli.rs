@@ -2,9 +2,11 @@ use futures::{ready, Stream, StreamExt};
 use rstream::{
     cli::{connect, Client},
     pb::{PAckDataRequest, PGetDataRequest},
+    stream::RpcReader,
 };
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -148,15 +150,13 @@ impl Stream for FetchStream {
 #[tokio::main]
 async fn main() {
     let host = "localhost";
-    let port = 8888 as u16;
+    let port = 8888_u16;
     let addr = format!("http://{}:{}", host, port);
     let endpoint = Endpoint::from_shared(addr).unwrap();
 
-    let cli = connect(endpoint).await;
-
-    let mut fs = FetchStream::new(cli);
-    for i in 0..10 {
-        let fut = fs.next().await;
-        println!("{fut:?}");
+    let cli = Arc::new(connect(endpoint).await);
+    let mut stream = RpcReader::new(cli);
+    while let Some(data) = stream.next().await {
+        println!("data: {:?}", data);
     }
 }

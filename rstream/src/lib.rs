@@ -7,4 +7,5 @@ pub mod pb {
 }
 
 pub mod cli;
+pub mod stream;
 pub mod svc;
