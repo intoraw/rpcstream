@@ -38,7 +38,7 @@ impl DataService for DataServiceImpl {
             data: format!("Data {}", seq),
             eos,
         };
-        println!("{request:?} {resp:?}");
+        println!("get_data seq {}", seq);
         Ok(tonic::Response::new(resp))
     }
 
@@ -48,17 +48,17 @@ impl DataService for DataServiceImpl {
     ) -> std::result::Result<tonic::Response<PAckDataResponse>, tonic::Status> {
         self.acked
             .store(request.get_ref().seq, std::sync::atomic::Ordering::Relaxed);
+        println!("ack_data seq {}", request.get_ref().seq);
         let resp = PAckDataResponse {};
-        println!("{request:?} {resp:?}");
         Ok(tonic::Response::new(resp))
     }
 
     async fn close(
         &self,
-        request: tonic::Request<PCloseRequest>,
+        _request: tonic::Request<PCloseRequest>,
     ) -> std::result::Result<tonic::Response<PCloseResponse>, tonic::Status> {
+        println!("close");
         let resp = PCloseResponse {};
-        println!("{request:?} {resp:?}");
         Ok(tonic::Response::new(resp))
     }
 }

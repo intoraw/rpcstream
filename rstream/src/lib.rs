@@ -7,5 +7,5 @@ pub mod pb {
 }
 
 pub mod cli;
-pub mod stream;
+pub mod remote_buf;
 pub mod svc;

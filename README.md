@@ -1,3 +1,4 @@
-RpcStream
-====
-Impl Stream RPC in Application layer.
+# RpcStream
+
+Demo of building a streamed rpc without gRpc stream feature. Partial code comes
+from Luv-Ray.
