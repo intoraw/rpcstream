@@ -1,6 +1,6 @@
 use std::{collections::LinkedList, future::Future, pin::Pin, sync::Arc, task::Poll};
 
-use futures::{FutureExt, Stream};
+use futures::{future::BoxFuture, FutureExt, Stream};
 use tonic::Status;
 
 use crate::{
@@ -10,17 +10,11 @@ use crate::{
 
 pub type Payload = String;
 
-pub type GetDataFuture =
-    Pin<Box<dyn Future<Output = Result<tonic::Response<PGetDataResponse>, Status>> + Send>>;
-pub type AckDataFuture =
-    Pin<Box<dyn Future<Output = Result<tonic::Response<PAckDataResponse>, Status>> + Send>>;
-pub type CloseFuture =
-    Pin<Box<dyn Future<Output = Result<tonic::Response<PCloseResponse>, Status>> + Send>>;
+pub type GetDataResp = Result<tonic::Response<PGetDataResponse>, Status>;
+pub type AckDataResp = Result<tonic::Response<PAckDataResponse>, Status>;
+pub type CloseResp = Result<tonic::Response<PCloseResponse>, Status>;
 
 pub struct RemoteBuffer {
-    //# Safety: raw_cli references owned_cli, which guarantees raw_cli will not outlive owned_cli
-    raw_cli: &'static Client,
-    #[allow(unused)]
     owned_cli: Arc<Client>,
     state: BufferState,
     eos: bool,
@@ -32,9 +26,7 @@ pub struct RemoteBuffer {
 impl RemoteBuffer {
     pub fn new(cli: Arc<Client>) -> Self {
         let owned_cli = cli;
-        let raw_cli: &'static Client = unsafe { &*(owned_cli.as_ref() as *const Client) };
         Self {
-            raw_cli,
             owned_cli,
             state: Default::default(),
             seq: 0,
@@ -44,18 +36,18 @@ impl RemoteBuffer {
         }
     }
 
-    pub async fn get(&self, seq: i64) -> Result<tonic::Response<PGetDataResponse>, Status> {
+    pub fn get(&self, seq: i64) -> BoxFuture<Result<tonic::Response<PGetDataResponse>, Status>> {
         let req = PGetDataRequest { seq };
-        self.raw_cli.get_data(req).await
+        self.owned_cli.clone().get_data(req).boxed()
     }
 
-    pub async fn ack(&self, seq: i64) -> Result<tonic::Response<PAckDataResponse>, Status> {
+    pub fn ack(&self, seq: i64) -> BoxFuture<Result<tonic::Response<PAckDataResponse>, Status>> {
         let req = PAckDataRequest { seq };
-        self.raw_cli.ack_data(req).await
+        self.owned_cli.clone().ack_data(req).boxed()
     }
 
-    pub async fn close(&self) -> Result<tonic::Response<PCloseResponse>, Status> {
-        self.raw_cli.close().await
+    pub fn close(&self) -> BoxFuture<Result<tonic::Response<PCloseResponse>, Status>> {
+        self.owned_cli.clone().close().boxed()
     }
 }
 
@@ -89,8 +81,8 @@ pub enum BufferState {
 }
 
 pub enum Operation {
-    Get(GetDataFuture),
-    Ack(AckDataFuture),
+    Get(BoxFuture<'static, GetDataResp>),
+    Ack(BoxFuture<'static, AckDataResp>),
 }
 
 impl Future for RemoteBuffer {
@@ -98,10 +90,13 @@ impl Future for RemoteBuffer {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         loop {
-            match self.state {
+            match &mut self.state {
                 BufferState::Idle => {
-                    let fut = { self.raw_cli.get_data(PGetDataRequest { seq: self.seq }) };
-                    self.state = BufferState::Busy(Operation::Get(Box::pin(fut)))
+                    let fut = {
+                        let req = PGetDataRequest { seq: self.seq };
+                        self.owned_cli.clone().get_data(req).boxed()
+                    };
+                    self.state = BufferState::Busy(Operation::Get(fut))
                 }
                 BufferState::Busy(Operation::Get(ref mut fut)) => match fut.as_mut().poll_unpin(cx)
                 {
@@ -109,8 +104,11 @@ impl Future for RemoteBuffer {
                         let PGetDataResponse { seq, data, eos } = resp.into_inner();
                         self.pending = Some(data);
                         self.eos |= eos;
-                        let fut = { self.raw_cli.ack_data(PAckDataRequest { seq }) };
-                        self.state = BufferState::Busy(Operation::Ack(Box::pin(fut)));
+                        let fut = {
+                            let req = PAckDataRequest { seq };
+                            self.owned_cli.clone().ack_data(req).boxed()
+                        };
+                        self.state = BufferState::Busy(Operation::Ack(fut));
                     }
                     Poll::Ready(Err(status)) => {
                         self.state = BufferState::Terminated(Some(BufferError::GetDataErr(status)));
@@ -126,7 +124,10 @@ impl Future for RemoteBuffer {
                         if self.eos {
                             self.state = BufferState::Terminated(None);
                         } else {
-                            let fut = { self.raw_cli.get_data(PGetDataRequest { seq: self.seq }) };
+                            let fut = {
+                                let req = PGetDataRequest { seq: self.seq };
+                                self.owned_cli.clone().get_data(req).boxed()
+                            };
                             self.state = BufferState::Busy(Operation::Get(Box::pin(fut)));
                         }
                     }
